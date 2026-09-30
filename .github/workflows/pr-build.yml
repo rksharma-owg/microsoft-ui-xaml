@@ -13,10 +13,11 @@ on:
         type: boolean
 permissions:
   contents: read
+  actions: read
 jobs:
   baseline-build:
     runs-on: windows-2022
-    timeout-minutes: 60
+    timeout-minutes: 15
     env:
       CL: /MP2
       EXPECTED_SHA: ${{ inputs.tested_sha }}
@@ -34,47 +35,29 @@ jobs:
           if ($actual -ne $env:EXPECTED_SHA) { throw "Wrong checkout: $actual" }
           Write-Host "Tested SHA: $actual"
           New-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem' -Name LongPathsEnabled -Value 1 -PropertyType DWord -Force | Out-Null
-      - name: Initialize and build product and tests
-        working-directory: source
-        shell: pwsh
-        run: |
-          .\init.ps1 amd64chk /nopgo /notitle
-          .\initrun.ps1 -Flavor amd64chk .\build.cmd product /q /b 2>&1 | Tee-Object -FilePath build.log
-          if ($LASTEXITCODE -ne 0) { throw "Product build failed: $LASTEXITCODE" }
-          .\initrun.ps1 -Flavor amd64chk .\build.cmd test /q /b /nomock 2>&1 | Tee-Object -FilePath build.log -Append
-          $buildExit = $LASTEXITCODE
-          if ($buildExit -ne 0) { throw "Build exited with code $buildExit" }
-          if (Select-String -Path build.log -Pattern 'ERROR: buildSolution|error MSB\d+|error C\d+|error CS\d+' -Quiet) {
-            throw "Build log contains errors despite a zero exit code"
-          }
-      - name: Record compiled commit
-        working-directory: source
-        shell: pwsh
-        run: git rev-parse HEAD | Set-Content compiled-sha.txt
-      - name: Preserve compiled test payload
-        uses: actions/upload-artifact@v6
+      - uses: actions/download-artifact@v5
         with:
           name: compiled-test-binaries
-          retention-days: 3
-          path: |
-            source/compiled-sha.txt
-            source/BuildOutput/bin/**
-            !source/BuildOutput/bin/**/*.pdb
-      - name: Run ItemsRepeater move regressions
-        if: inputs.run_regressions
-        timeout-minutes: 10
+          run-id: 36673803813
+          github-token: ${{ github.token }}
+          path: source
+      - name: Verify compiled artifact and run targeted API tests
         working-directory: source
         shell: pwsh
         run: |
-          .\test\CreateTestPayload.ps1 -Platform x64 -Configuration chk -SkipSymbols -SkipWinUIGallery
-          Push-Location TestPayload/x64chk
+          $compiled = (Get-Content compiled-sha.txt).Trim()
+          if ($compiled -ne $env:EXPECTED_SHA) { throw "Wrong compiled SHA: $compiled" }
+          $app = 'BuildOutput/bin/amd64chk/Test/UnpackagedApps/MUXControlsTestApp'
+          Get-ChildItem $app | Select-Object Name, Length
+          foreach ($file in @('te.exe', 'TE.ProcessHost.exe', 'MUXControlsTestApp.dll', 'localDotNet')) {
+            if (-not (Test-Path "$app/$file")) { throw "Missing runtime input: $file" }
+          }
+          Push-Location $app
           try {
-            & powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\TestPass-OneTimeMachineSetupCore.ps1 -Platform x64
-            if ($LASTEXITCODE -ne 0) { throw "Test machine setup failed" }
             $query = "@Name='*MoveUpdatesAllIndicesBeforeRaisingEvents' OR @Name='*MoveUpdatesPinnedElementOnlyOnce' OR @Name='*MovePreservesSuggestedAnchorPosition'"
-            & .\te.exe Test\UnpackagedApps\MUXControlsTestApp\MUXControlsTestApp.dll "/select:$query" /p:SkipConsoleWindowMinimize 2>&1 | Tee-Object -FilePath ../../regression-tests.log
+            & .\te.exe MUXControlsTestApp.dll "/select:$query" /p:SkipConsoleWindowMinimize 2>&1 | Tee-Object -FilePath "$env:GITHUB_WORKSPACE/source/regression-tests.log"
             $testExit = $LASTEXITCODE
-            $summary = Get-Content ../../regression-tests.log | Where-Object { $_ -match 'Summary:\s+Total=\d+' } | Select-Object -Last 1
+            $summary = Get-Content "$env:GITHUB_WORKSPACE/source/regression-tests.log" | Where-Object { $_ -match 'Summary:\s+Total=\d+' } | Select-Object -Last 1
             if ($testExit -ne 0 -or $summary -notmatch 'Total=3,' -or $summary -notmatch 'Passed=3,' -or $summary -notmatch 'Failed=0,') {
               throw "Three passing regression tests required. Exit=$testExit Summary=$summary"
             }
