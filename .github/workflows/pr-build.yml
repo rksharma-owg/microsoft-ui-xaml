@@ -6,6 +6,11 @@ on:
         description: Exact contribution commit to compile
         required: true
         type: string
+      flavors:
+        description: JSON array of configurations to validate
+        required: true
+        default: '["x86chk", "x86fre", "amd64fre", "arm64chk", "arm64fre"]'
+        type: string
 permissions:
   contents: read
 jobs:
@@ -16,7 +21,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        flavor: [x86chk, x86fre, amd64fre, arm64chk, arm64fre]
+        flavor: ${{ fromJSON(inputs.flavors) }}
     env:
       CL: /MP2
       EXPECTED_SHA: ${{ inputs.tested_sha }}
