@@ -47,6 +47,19 @@ jobs:
           if (Select-String -Path build.log -Pattern 'ERROR: buildSolution|error MSB\d+|error C\d+|error CS\d+' -Quiet) {
             throw "Build log contains errors despite a zero exit code"
           }
+      - name: Record compiled commit
+        working-directory: source
+        shell: pwsh
+        run: git rev-parse HEAD | Set-Content compiled-sha.txt
+      - name: Preserve compiled test payload
+        uses: actions/upload-artifact@v6
+        with:
+          name: compiled-test-binaries
+          retention-days: 3
+          path: |
+            source/compiled-sha.txt
+            source/BuildOutput/bin/**
+            !source/BuildOutput/bin/**/*.pdb
       - name: Run ItemsRepeater move regressions
         if: inputs.run_regressions
         timeout-minutes: 10
