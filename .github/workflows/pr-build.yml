@@ -39,7 +39,9 @@ jobs:
         shell: pwsh
         run: |
           .\init.ps1 amd64chk /nopgo /notitle
-          .\initrun.ps1 -Flavor amd64chk .\build.cmd /q /b 2>&1 | Tee-Object -FilePath build.log
+          .\initrun.ps1 -Flavor amd64chk .\build.cmd product /q /b 2>&1 | Tee-Object -FilePath build.log
+          if ($LASTEXITCODE -ne 0) { throw "Product build failed: $LASTEXITCODE" }
+          .\initrun.ps1 -Flavor amd64chk .\build.cmd test /q /b /nomock 2>&1 | Tee-Object -FilePath build.log -Append
           $buildExit = $LASTEXITCODE
           if ($buildExit -ne 0) { throw "Build exited with code $buildExit" }
           if (Select-String -Path build.log -Pattern 'ERROR: buildSolution|error MSB\d+|error C\d+|error CS\d+' -Quiet) {
