@@ -55,7 +55,14 @@ jobs:
         shell: pwsh
         run: |
           .\init.ps1 $env:BUILD_FLAVOR /nopgo /notitle
-          .\initrun.ps1 -Flavor $env:BUILD_FLAVOR .\build.cmd product /q /b 2>&1 | Tee-Object -FilePath build.log
+          # Match upstream build-pr.ps1's /nopgo after initrun resets the environment.
+          @'
+          @echo off
+          set PGOBuildMode=Off
+          call build.cmd product /q /b
+          exit /b %ERRORLEVEL%
+          '@ | Set-Content -Encoding ascii preflight-product.cmd
+          .\initrun.ps1 -Flavor $env:BUILD_FLAVOR .\preflight-product.cmd 2>&1 | Tee-Object -FilePath build.log
           if ($LASTEXITCODE -ne 0) { throw "Product build failed: $LASTEXITCODE" }
           if (Select-String -Path build.log -Pattern 'ERROR: buildSolution|error MSB\d+|error C\d+|error CS\d+' -Quiet) {
             throw "Build log contains errors despite a zero exit code"
