@@ -48,14 +48,19 @@ jobs:
           $compiled = (Get-Content compiled-sha.txt).Trim()
           if ($compiled -ne $env:EXPECTED_SHA) { throw "Wrong compiled SHA: $compiled" }
           $app = 'BuildOutput/bin/amd64chk/Test/UnpackagedApps/MUXControlsTestApp'
-          Get-ChildItem $app | Select-Object Name, Length
+          $sdkRoot = "${env:ProgramFiles(x86)}/Microsoft SDKs"
+          $dependency = Get-ChildItem $sdkRoot -Recurse -Filter Microsoft.VCLibs.x64.Debug.14.00.Desktop.appx | Select-Object -First 1
+          if (-not $dependency) { throw 'Debug desktop VCLibs package not found in Windows SDK' }
+          & powershell.exe -NoProfile -Command "Add-AppxPackage -Path '$($dependency.FullName)' -ErrorAction Stop"
+          if ($LASTEXITCODE -ne 0) { throw 'VCLibs registration failed' }
           foreach ($file in @('te.exe', 'TE.ProcessHost.exe', 'MUXControlsTestApp.dll', 'localDotNet')) {
             if (-not (Test-Path "$app/$file")) { throw "Missing runtime input: $file" }
           }
           Push-Location $app
           try {
             $query = "@Name='*MoveUpdatesAllIndicesBeforeRaisingEvents' OR @Name='*MoveUpdatesPinnedElementOnlyOnce' OR @Name='*MovePreservesSuggestedAnchorPosition'"
-            & .\te.exe MUXControlsTestApp.dll "/select:$query" /p:SkipConsoleWindowMinimize 2>&1 | Tee-Object -FilePath "$env:GITHUB_WORKSPACE/source/regression-tests.log"
+            $PSNativeCommandArgumentPassing = 'Legacy'
+            & .\te.exe MUXControlsTestApp.dll "/select:`"$query`"" /p:SkipConsoleWindowMinimize 2>&1 | Tee-Object -FilePath "$env:GITHUB_WORKSPACE/source/regression-tests.log"
             $testExit = $LASTEXITCODE
             $summary = Get-Content "$env:GITHUB_WORKSPACE/source/regression-tests.log" | Where-Object { $_ -match 'Summary:\s+Total=\d+' } | Select-Object -Last 1
             if ($testExit -ne 0 -or $summary -notmatch 'Total=3,' -or $summary -notmatch 'Passed=3,' -or $summary -notmatch 'Failed=0,') {
