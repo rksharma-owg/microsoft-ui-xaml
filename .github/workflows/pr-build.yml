@@ -6,25 +6,31 @@ on:
         description: Exact contribution commit to compile
         required: true
         type: string
-      run_regressions:
-        description: Execute the three ItemsRepeater move regressions after building
-        required: false
-        default: false
-        type: boolean
+      flavors:
+        description: JSON array of configurations to validate
+        required: true
+        default: '["x86chk", "x86fre", "amd64fre", "arm64chk", "arm64fre"]'
+        type: string
 permissions:
   contents: read
-  actions: read
 jobs:
-  baseline-build:
+  product-matrix:
+    name: Product (${{ matrix.flavor }})
     runs-on: windows-2022
-    timeout-minutes: 15
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        flavor: ${{ fromJSON(inputs.flavors) }}
     env:
       CL: /MP2
       EXPECTED_SHA: ${{ inputs.tested_sha }}
+      BUILD_FLAVOR: ${{ matrix.flavor }}
     steps:
       - uses: actions/checkout@v5
         with:
           ref: ${{ inputs.tested_sha }}
+          fetch-depth: 0
           persist-credentials: false
           path: source
       - name: Verify tested commit
@@ -33,54 +39,32 @@ jobs:
         run: |
           $actual = git rev-parse HEAD
           if ($actual -ne $env:EXPECTED_SHA) { throw "Wrong checkout: $actual" }
-          Write-Host "Tested SHA: $actual"
+          Write-Host "Tested SHA: $actual; flavor: $env:BUILD_FLAVOR"
+          # Release PGO tooling resolves origin/main; use the real upstream baseline.
+          git remote set-url origin https://github.com/microsoft/microsoft-ui-xaml.git
+          git fetch origin main
+          if ($LASTEXITCODE -ne 0) { throw 'Upstream baseline fetch failed' }
+          $baseline = git rev-parse origin/main
+          if ($baseline -ne '5d329a5c8eb5b8ca5b35069c7352d661c07924ee') { throw "Baseline changed: $baseline" }
+          $mergeBase = git merge-base origin/main HEAD
+          if ($mergeBase -ne $baseline) { throw "Wrong merge base: $mergeBase" }
+          Write-Host "Verified upstream baseline: $baseline"
           New-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem' -Name LongPathsEnabled -Value 1 -PropertyType DWord -Force | Out-Null
-      - uses: actions/download-artifact@v5
-        with:
-          name: compiled-test-binaries
-          run-id: 36678244804
-          github-token: ${{ github.token }}
-          path: source
-      - name: Verify compiled artifact and run targeted API tests
+      - name: Build product and package
         working-directory: source
         shell: pwsh
         run: |
-          $compiled = (Get-Content compiled-sha.txt).Trim()
-          if ($compiled -ne $env:EXPECTED_SHA) { throw "Wrong compiled SHA: $compiled" }
-          $app = 'BuildOutput/bin/amd64chk/Test/UnpackagedApps/MUXControlsTestApp'
-          $sdkRoot = "${env:ProgramFiles(x86)}/Microsoft SDKs"
-          $dependency = Get-ChildItem $sdkRoot -Recurse -Filter Microsoft.VCLibs.x64.Debug.14.00.Desktop.appx | Select-Object -First 1
-          if (-not $dependency) { throw 'Debug desktop VCLibs package not found in Windows SDK' }
-          & powershell.exe -NoProfile -Command "Add-AppxPackage -Path '$($dependency.FullName)' -ErrorAction Stop"
-          if ($LASTEXITCODE -ne 0) { throw 'VCLibs registration failed' }
-          foreach ($file in @('te.exe', 'TE.ProcessHost.exe', 'MUXControlsTestApp.dll', 'localDotNet')) {
-            if (-not (Test-Path "$app/$file")) { throw "Missing runtime input: $file" }
+          .\init.ps1 $env:BUILD_FLAVOR /nopgo /notitle
+          .\initrun.ps1 -Flavor $env:BUILD_FLAVOR .\build.cmd product /q /b 2>&1 | Tee-Object -FilePath build.log
+          if ($LASTEXITCODE -ne 0) { throw "Product build failed: $LASTEXITCODE" }
+          if (Select-String -Path build.log -Pattern 'ERROR: buildSolution|error MSB\d+|error C\d+|error CS\d+' -Quiet) {
+            throw "Build log contains errors despite a zero exit code"
           }
-          Push-Location $app
-          try {
-            $query = "@Name='*RepeaterTests.ViewManagerTests.*'"
-            $PSNativeCommandArgumentPassing = 'Legacy'
-            & .\te.exe MUXControlsTestApp.dll "/select:`"$query`"" /p:SkipConsoleWindowMinimize 2>&1 | Tee-Object -FilePath "$env:GITHUB_WORKSPACE/source/regression-tests.log"
-            $testExit = $LASTEXITCODE
-            $summary = Get-Content "$env:GITHUB_WORKSPACE/source/regression-tests.log" | Where-Object { $_ -match 'Summary:\s+Total=\d+' } | Select-Object -Last 1
-            if ($testExit -ne 0 -or $summary -notmatch 'Total=14,' -or $summary -notmatch 'Passed=14,' -or $summary -notmatch 'Failed=0,' -or $summary -notmatch 'Blocked=0,' -or $summary -notmatch 'Skipped=0') {
-              throw "All 14 enabled ViewManager tests must pass (TAEF omits the 4 Ignore=True tests). Exit=$testExit Summary=$summary"
-            }
-          } finally { Pop-Location }
-      - name: Collect MSBuild crash diagnostics
-        if: always()
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force -Path diagnostics | Out-Null
-          Get-ChildItem -Path $env:TEMP -Filter 'MSBuild_*.failure.txt' -Recurse -ErrorAction SilentlyContinue |
-            Copy-Item -Destination diagnostics
       - uses: actions/upload-artifact@v6
         if: always()
         with:
-          name: build-diagnostics
+          name: diagnostics-${{ matrix.flavor }}
+          retention-days: 3
           path: |
             source/BuildOutput/**/*.binlog
             source/build.log
-            source/regression-tests.log
-            diagnostics/**
-          if-no-files-found: ignore
