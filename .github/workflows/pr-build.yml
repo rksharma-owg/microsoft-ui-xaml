@@ -6,6 +6,11 @@ on:
         description: Exact contribution commit to compile
         required: true
         type: string
+      run_regressions:
+        description: Execute the three ItemsRepeater move regressions after building
+        required: false
+        default: false
+        type: boolean
 permissions:
   contents: read
 jobs:
@@ -33,12 +38,32 @@ jobs:
         working-directory: source
         shell: pwsh
         run: |
-          cmd /c "call init.cmd x64chk /nopgo && call build.cmd /q /b" 2>&1 | Tee-Object -FilePath build.log
+          .\init.ps1 amd64chk /nopgo /notitle
+          .\initrun.ps1 -Flavor amd64chk .\build.cmd /q /b 2>&1 | Tee-Object -FilePath build.log
           $buildExit = $LASTEXITCODE
           if ($buildExit -ne 0) { throw "Build exited with code $buildExit" }
           if (Select-String -Path build.log -Pattern 'ERROR: buildSolution|error MSB\d+|error C\d+|error CS\d+' -Quiet) {
             throw "Build log contains errors despite a zero exit code"
           }
+      - name: Run ItemsRepeater move regressions
+        if: inputs.run_regressions
+        timeout-minutes: 10
+        working-directory: source
+        shell: pwsh
+        run: |
+          .\test\CreateTestPayload.ps1 -Platform x64 -Configuration chk -SkipSymbols -SkipWinUIGallery
+          Push-Location TestPayload/x64chk
+          try {
+            & powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\TestPass-OneTimeMachineSetupCore.ps1 -Platform x64
+            if ($LASTEXITCODE -ne 0) { throw "Test machine setup failed" }
+            $query = "@Name='*MoveUpdatesAllIndicesBeforeRaisingEvents' OR @Name='*MoveUpdatesPinnedElementOnlyOnce' OR @Name='*MovePreservesSuggestedAnchorPosition'"
+            & .\te.exe Test\UnpackagedApps\MUXControlsTestApp\MUXControlsTestApp.dll "/select:$query" /p:SkipConsoleWindowMinimize 2>&1 | Tee-Object -FilePath ../../regression-tests.log
+            $testExit = $LASTEXITCODE
+            $summary = Get-Content ../../regression-tests.log | Where-Object { $_ -match 'Summary:\s+Total=\d+' } | Select-Object -Last 1
+            if ($testExit -ne 0 -or $summary -notmatch 'Total=3,' -or $summary -notmatch 'Passed=3,' -or $summary -notmatch 'Failed=0,') {
+              throw "Three passing regression tests required. Exit=$testExit Summary=$summary"
+            }
+          } finally { Pop-Location }
       - name: Collect MSBuild crash diagnostics
         if: always()
         shell: pwsh
@@ -53,5 +78,6 @@ jobs:
           path: |
             source/BuildOutput/**/*.binlog
             source/build.log
+            source/regression-tests.log
             diagnostics/**
           if-no-files-found: ignore
